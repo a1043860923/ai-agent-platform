@@ -23,7 +23,7 @@
  */
 
 import { Document } from '@langchain/core/documents';
-import { LocalEmbeddings, createLocalEmbeddings } from './local-embeddings';
+import { OpenAIEmbeddings } from '@langchain/openai';
 import path from 'path';
 import fs from 'fs';
 
@@ -97,15 +97,21 @@ function saveToFile(collectionName: string, entries: VectorEntry[]): void {
 /**
  * 获取Embedding模型实例
  * 
- * 功能：创建本地Embedding模型实例
- * 使用 Xenova Transformers 库加载本地开源模型
+ * 功能：创建 OpenAI Embedding 实例
+ * 使用智谱AI的 Embedding API（兼容 OpenAI 接口）
  * 
- * @returns LocalEmbeddings 本地Embedding实例
+ * @returns OpenAIEmbeddings Embedding实例
  */
-function getEmbeddings(): LocalEmbeddings {
-  // 创建本地Embedding实例
-  // 使用中文优化的 bge-small-zh-v1.5 模型（v1.5版本更稳定）
-  return createLocalEmbeddings('Xenova/bge-small-zh-v1.5');
+function getEmbeddings(): OpenAIEmbeddings {
+  // 使用智谱AI的 Embedding API
+  // 模型名称：embedding-3 或其他支持的模型
+  return new OpenAIEmbeddings({
+    apiKey: process.env.OPENAI_API_KEY,
+    modelName: 'embedding-3',
+    configuration: {
+      baseURL: process.env.OPENAI_API_BASE,
+    },
+  });
 }
 
 /**
@@ -129,9 +135,9 @@ function cosineSimilarity(a: number[], b: number[]): number {
  */
 class LocalVectorStore {
   private collectionName: string;
-  private embeddings: LocalEmbeddings;
+  private embeddings: OpenAIEmbeddings;
 
-  constructor(collectionName: string, embeddings: LocalEmbeddings) {
+  constructor(collectionName: string, embeddings: OpenAIEmbeddings) {
     this.collectionName = collectionName;
     this.embeddings = embeddings;
   }
