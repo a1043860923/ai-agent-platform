@@ -40,11 +40,63 @@ const isServerless: boolean = !!(
 // 检测是否在浏览器/客户端环境
 const isBrowser = typeof window !== 'undefined';
 
-// 模型基础路径配置
-// Serverless 环境使用打包的静态资源，本地开发使用缓存目录
-const MODEL_BASE_PATH = isServerless
-  ? path.join(process.cwd(), 'public', 'models')
-  : path.join(process.cwd(), '.cache', 'transformers');
+/**
+ * 获取可能的模型基础路径列表
+ * Serverless 环境需要尝试多个路径，因为 process.cwd() 可能不准确
+ */
+function getPossibleModelPaths(): string[] {
+  const paths: string[] = [];
+  
+  if (isServerless) {
+    // Vercel 部署时的可能路径（按优先级排序）
+    paths.push(
+      path.join(process.cwd(), '.next', 'standalone', 'public', 'models'),  // standalone 构建输出
+      path.join('/var/task', 'public', 'models'),  // Vercel 常见路径
+      path.join(process.cwd(), 'public', 'models'),  // 项目根目录
+      path.join('/tmp', 'models'),  // 临时目录（可写）
+    );
+  } else {
+    // 本地开发路径
+    paths.push(path.join(process.cwd(), '.cache', 'transformers'));
+  }
+  
+  return paths;
+}
+
+/**
+ * 查找实际存在的模型路径
+ */
+function findExistingModelPath(): string | null {
+  const possiblePaths = getPossibleModelPaths();
+  
+  for (const basePath of possiblePaths) {
+    // 检查是否有模型目录
+    const modelDir = path.join(basePath, 'Xenova--bge-small-zh-v1.5');
+    if (fs.existsSync(modelDir)) {
+      console.log(`[LocalEmbeddings] 找到模型路径: ${basePath}`);
+      return basePath;
+    }
+  }
+  
+  // 如果没有找到，返回第一个路径作为默认
+  return possiblePaths[0] || null;
+}
+
+// 模型基础路径（延迟初始化）
+let MODEL_BASE_PATH: string | null = null;
+
+/**
+ * 获取模型基础路径（带缓存）
+ */
+function getModelBasePath(): string {
+  if (!MODEL_BASE_PATH) {
+    MODEL_BASE_PATH = findExistingModelPath();
+    if (!MODEL_BASE_PATH) {
+      throw new Error('[LocalEmbeddings] 无法确定模型基础路径');
+    }
+  }
+  return MODEL_BASE_PATH;
+}
 
 // 配置 Transformers.js 环境
 if (typeof env !== 'undefined' && env) {
@@ -52,14 +104,8 @@ if (typeof env !== 'undefined' && env) {
   env.allowRemoteModels = !isServerless;
   env.allowLocalModels = true;
   
-  // 设置本地缓存目录
-  env.cacheDir = MODEL_BASE_PATH;
-  
-  // 如果是 Serverless 环境，设置模型根路径
-  if (isServerless) {
-    // @ts-ignore - 设置本地模型路径
-    env.localModelPath = MODEL_BASE_PATH;
-  }
+  // 延迟设置缓存目录，在首次使用时确定
+  // 注意：env.cacheDir 会在 getPipeline 中设置
   
   // 配置 Hugging Face 镜像源（国内访问）
   const HF_MIRROR = process.env.HF_MIRROR || 'https://hf-mirror.com';
@@ -104,7 +150,8 @@ function getLocalModelPath(modelName: string): string | null {
   const localName = MODEL_PATH_MAPPING[modelName];
   if (!localName) return null;
   
-  const modelPath = path.join(MODEL_BASE_PATH, localName);
+  const basePath = getModelBasePath();
+  const modelPath = path.join(basePath, localName);
   
   // 检查模型目录是否存在
   if (fs.existsSync(modelPath)) {
@@ -219,8 +266,15 @@ export class LocalEmbeddings extends Embeddings {
         
         if (localPath) {
           console.log(`[LocalEmbeddings] 使用本地模型: ${localPath}`);
-          // 在 Serverless 环境，直接使用本地路径作为模型名称
-          // Transformers.js 会相对于 localModelPath 查找
+          
+          // 设置 Transformers.js 环境
+          const basePath = getModelBasePath();
+          if (typeof env !== 'undefined' && env) {
+            env.cacheDir = basePath;
+            // @ts-ignore
+            env.localModelPath = basePath;
+          }
+          
           pipelineConfig.local = true;
         } else if (isServerless) {
           throw new Error(
@@ -408,7 +462,8 @@ export function getDownloadedModels(): string[] {
   const models: string[] = [];
   
   for (const [modelName, localName] of Object.entries(MODEL_PATH_MAPPING)) {
-    const modelPath = path.join(MODEL_BASE_PATH, localName);
+    const basePath = getModelBasePath();
+    const modelPath = path.join(basePath, localName);
     if (fs.existsSync(modelPath)) {
       models.push(modelName);
     }

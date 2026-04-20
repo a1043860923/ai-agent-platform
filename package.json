@@ -4,10 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "npm run download-models && next build",
+    "build": "npm run download-models && next build && npm run copy-models",
     "start": "next start",
     "lint": "eslint",
     "download-models": "node scripts/download-models.js",
+    "copy-models": "node scripts/copy-models.js",
     "prebuild": "echo '如需预下载模型，请运行: npm run download-models'"
   },
   "dependencies": {
