@@ -40,20 +40,32 @@ const isServerless: boolean = !!(
 // 检测是否在浏览器/客户端环境
 const isBrowser = typeof window !== 'undefined';
 
+// 是否强制使用远程模型（当本地模型不可用时）
+const FORCE_REMOTE_MODELS = process.env.FORCE_REMOTE_MODELS === 'true';
+
+// 调试日志
+function debugLog(...args: any[]) {
+  if (process.env.DEBUG_EMBEDDINGS === 'true' || isServerless) {
+    console.log('[LocalEmbeddings]', ...args);
+  }
+}
+
 /**
  * 获取可能的模型基础路径列表
- * Serverless 环境需要尝试多个路径，因为 process.cwd() 可能不准确
+ * Serverless 环境需要尝试多个路径
  */
 function getPossibleModelPaths(): string[] {
   const paths: string[] = [];
   
   if (isServerless) {
     // Vercel 部署时的可能路径（按优先级排序）
+    // Vercel 使用 includeFiles 将模型文件打包到函数中
     paths.push(
-      path.join(process.cwd(), '.next', 'standalone', 'public', 'models'),  // standalone 构建输出
-      path.join('/var/task', 'public', 'models'),  // Vercel 常见路径
-      path.join(process.cwd(), 'public', 'models'),  // 项目根目录
-      path.join('/tmp', 'models'),  // 临时目录（可写）
+      path.join(process.cwd(), 'public', 'models'),  // Vercel 打包后的路径
+      path.join('/var/task', 'public', 'models'),    // Vercel 运行时路径
+      path.join(process.cwd(), '.next', 'standalone', 'public', 'models'),
+      path.join('/var/task', '.next', 'standalone', 'public', 'models'),
+      path.join('/tmp', 'models'),
     );
   } else {
     // 本地开发路径
@@ -69,43 +81,60 @@ function getPossibleModelPaths(): string[] {
 function findExistingModelPath(): string | null {
   const possiblePaths = getPossibleModelPaths();
   
+  debugLog('检查以下路径:', possiblePaths);
+  
   for (const basePath of possiblePaths) {
     // 检查是否有模型目录
     const modelDir = path.join(basePath, 'Xenova--bge-small-zh-v1.5');
+    debugLog(`检查路径: ${modelDir}, 存在: ${fs.existsSync(modelDir)}`);
+    
     if (fs.existsSync(modelDir)) {
-      console.log(`[LocalEmbeddings] 找到模型路径: ${basePath}`);
-      return basePath;
+      // 检查是否有模型文件
+      const onnxDir = path.join(modelDir, 'onnx');
+      if (fs.existsSync(onnxDir)) {
+        const files = fs.readdirSync(onnxDir);
+        const hasModelFile = files.some(f => f.endsWith('.onnx'));
+        if (hasModelFile) {
+          debugLog(`找到完整模型路径: ${basePath}`);
+          return basePath;
+        }
+      }
     }
   }
   
-  // 如果没有找到，返回第一个路径作为默认
-  return possiblePaths[0] || null;
+  // 如果没有找到，记录警告并返回 null
+  debugLog('警告: 未找到完整的模型文件');
+  return null;
 }
 
 // 模型基础路径（延迟初始化）
 let MODEL_BASE_PATH: string | null = null;
+let MODEL_AVAILABLE: boolean = false;
 
 /**
  * 获取模型基础路径（带缓存）
  */
-function getModelBasePath(): string {
+function getModelBasePath(): string | null {
   if (!MODEL_BASE_PATH) {
     MODEL_BASE_PATH = findExistingModelPath();
-    if (!MODEL_BASE_PATH) {
-      throw new Error('[LocalEmbeddings] 无法确定模型基础路径');
-    }
+    MODEL_AVAILABLE = MODEL_BASE_PATH !== null;
   }
   return MODEL_BASE_PATH;
 }
 
+/**
+ * 检查模型是否可用
+ */
+export function isLocalModelAvailable(): boolean {
+  getModelBasePath(); // 确保初始化
+  return MODEL_AVAILABLE;
+}
+
 // 配置 Transformers.js 环境
 if (typeof env !== 'undefined' && env) {
-  // 禁用远程模型下载（Serverless 环境无法下载）
-  env.allowRemoteModels = !isServerless;
+  // 在 Serverless 环境禁用远程模型下载，除非强制使用远程
+  env.allowRemoteModels = !isServerless || FORCE_REMOTE_MODELS;
   env.allowLocalModels = true;
-  
-  // 延迟设置缓存目录，在首次使用时确定
-  // 注意：env.cacheDir 会在 getPipeline 中设置
   
   // 配置 Hugging Face 镜像源（国内访问）
   const HF_MIRROR = process.env.HF_MIRROR || 'https://hf-mirror.com';
@@ -150,12 +179,26 @@ function getLocalModelPath(modelName: string): string | null {
   const localName = MODEL_PATH_MAPPING[modelName];
   if (!localName) return null;
   
-  const basePath = getModelBasePath();
-  const modelPath = path.join(basePath, localName);
-  
-  // 检查模型目录是否存在
-  if (fs.existsSync(modelPath)) {
-    return modelPath;
+  try {
+    const basePath = getModelBasePath();
+    if (!basePath) return null;
+    
+    const modelPath = path.join(basePath, localName);
+    
+    // 检查模型目录是否存在
+    if (fs.existsSync(modelPath)) {
+      // 检查是否有模型文件
+      const onnxDir = path.join(modelPath, 'onnx');
+      if (fs.existsSync(onnxDir)) {
+        const files = fs.readdirSync(onnxDir);
+        const hasModelFile = files.some(f => f.endsWith('.onnx'));
+        if (hasModelFile) {
+          return modelPath;
+        }
+      }
+    }
+  } catch (e) {
+    debugLog('获取模型路径失败:', e);
   }
   
   return null;
@@ -211,11 +254,13 @@ export class LocalEmbeddings extends Embeddings {
     // Serverless 环境强制使用本地模型
     this.useLocalModels = params?.useLocalModels ?? isServerless;
     
-    // 如果在 Serverless 环境但模型不可用，发出警告
-    if (isServerless && !isModelAvailableLocally(this.modelName)) {
-      console.warn(`[LocalEmbeddings] 警告: 模型 ${this.modelName} 未在本地找到`);
-      console.warn(`[LocalEmbeddings] 请确保运行过: node scripts/download-models.js`);
-    }
+    debugLog('初始化 LocalEmbeddings:', {
+      modelName: this.modelName,
+      isServerless,
+      useLocalModels: this.useLocalModels,
+      modelAvailable: isLocalModelAvailable(),
+      cwd: process.cwd(),
+    });
   }
 
   /**
@@ -252,7 +297,7 @@ export class LocalEmbeddings extends Embeddings {
 
     // 标记开始加载
     LocalEmbeddings.isLoading = true;
-    console.log(`[LocalEmbeddings] 正在加载模型: ${this.modelName}...`);
+    debugLog(`正在加载模型: ${this.modelName}...`);
 
     try {
       // 准备 pipeline 配置
@@ -265,37 +310,40 @@ export class LocalEmbeddings extends Embeddings {
         const localPath = getLocalModelPath(this.modelName);
         
         if (localPath) {
-          console.log(`[LocalEmbeddings] 使用本地模型: ${localPath}`);
+          debugLog(`使用本地模型: ${localPath}`);
           
           // 设置 Transformers.js 环境
           const basePath = getModelBasePath();
-          if (typeof env !== 'undefined' && env) {
+          if (basePath && typeof env !== 'undefined' && env) {
             env.cacheDir = basePath;
             // @ts-ignore
             env.localModelPath = basePath;
+            // @ts-ignore
+            env.modelsDir = basePath;
           }
           
-          pipelineConfig.local = true;
-        } else if (isServerless) {
-          throw new Error(
-            `模型 ${this.modelName} 未找到。` +
-            `请先运行: node scripts/download-models.js`
+          // 在 Serverless 环境，使用本地路径作为模型名称
+          if (isServerless) {
+            pipelineConfig.local = true;
+          }
+        } else if (isServerless && !FORCE_REMOTE_MODELS) {
+          // Serverless 环境但没有本地模型，且不允许远程下载
+          const error = new Error(
+            `模型文件不完整。请确保已运行: node scripts/download-models.js 并下载完整的模型文件（包括 .onnx 文件）。` +
+            `或者设置环境变量 FORCE_REMOTE_MODELS=true 允许运行时下载（不推荐用于生产环境）。` +
+            `当前工作目录: ${process.cwd()}`
           );
+          throw error;
         }
       }
       
       // 如果不是 Serverless 环境，显示下载提示
       if (!isServerless && !this.useLocalModels) {
-        console.log(`[LocalEmbeddings] 首次加载需要下载模型文件（约几十MB），请耐心等待...`);
+        debugLog(`首次加载需要下载模型文件（约几十MB），请耐心等待...`);
       }
 
-      // 创建 AbortController 用于超时控制
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-      }, this.downloadTimeout);
-
       // 创建 feature-extraction pipeline
+      debugLog('调用 pipeline()...');
       LocalEmbeddings.pipeline = await pipeline(
         'feature-extraction' as PipelineType,
         this.modelName,
@@ -313,8 +361,7 @@ export class LocalEmbeddings extends Embeddings {
         }
       );
 
-      // 清除超时定时器
-      clearTimeout(timeoutId);
+      debugLog('模型加载成功！');
 
       // 通知所有等待的调用者
       LocalEmbeddings.loadingQueue.forEach((resolve) => resolve(LocalEmbeddings.pipeline));
@@ -462,12 +509,62 @@ export function getDownloadedModels(): string[] {
   const models: string[] = [];
   
   for (const [modelName, localName] of Object.entries(MODEL_PATH_MAPPING)) {
-    const basePath = getModelBasePath();
-    const modelPath = path.join(basePath, localName);
-    if (fs.existsSync(modelPath)) {
-      models.push(modelName);
+    try {
+      const basePath = getModelBasePath();
+      if (!basePath) continue;
+      
+      const modelPath = path.join(basePath, localName);
+      if (fs.existsSync(modelPath)) {
+        models.push(modelName);
+      }
+    } catch (e) {
+      // 忽略错误
     }
   }
   
   return models;
+}
+
+/**
+ * 获取调试信息
+ * 用于排查模型路径问题
+ */
+export function getDebugInfo(): object {
+  const possiblePaths = getPossibleModelPaths();
+  const pathInfo = possiblePaths.map(p => {
+    const modelDir = path.join(p, 'Xenova--bge-small-zh-v1.5');
+    const onnxDir = path.join(modelDir, 'onnx');
+    let hasModelFile = false;
+    
+    if (fs.existsSync(onnxDir)) {
+      try {
+        const files = fs.readdirSync(onnxDir);
+        hasModelFile = files.some(f => f.endsWith('.onnx'));
+      } catch (e) {
+        // 忽略错误
+      }
+    }
+    
+    return {
+      path: p,
+      exists: fs.existsSync(p),
+      modelDirExists: fs.existsSync(modelDir),
+      onnxDirExists: fs.existsSync(onnxDir),
+      hasModelFile,
+    };
+  });
+  
+  return {
+    isServerless,
+    forceRemoteModels: FORCE_REMOTE_MODELS,
+    modelAvailable: isLocalModelAvailable(),
+    cwd: process.cwd(),
+    env: {
+      VERCEL: process.env.VERCEL,
+      NODE_ENV: process.env.NODE_ENV,
+      FORCE_REMOTE_MODELS: process.env.FORCE_REMOTE_MODELS,
+    },
+    paths: pathInfo,
+    modelBasePath: MODEL_BASE_PATH,
+  };
 }
