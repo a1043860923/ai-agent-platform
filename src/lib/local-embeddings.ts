@@ -30,10 +30,12 @@ import fs from 'fs';
 // ==================== 环境配置 ====================
 
 // 检测是否在 Serverless 环境
-const isServerless = process.env.VERCEL === '1' || 
-                     process.env.AWS_LAMBDA_FUNCTION_NAME || 
-                     process.env.NETLIFY === 'true' ||
-                     process.env.NODE_ENV === 'production';
+const isServerless: boolean = !!(
+  process.env.VERCEL === '1' || 
+  process.env.AWS_LAMBDA_FUNCTION_NAME || 
+  process.env.NETLIFY === 'true' ||
+  process.env.NODE_ENV === 'production'
+);
 
 // 检测是否在浏览器/客户端环境
 const isBrowser = typeof window !== 'undefined';
