@@ -2,7 +2,9 @@
 
 一个基于 Next.js + LangChain 构建的 AI 智能问答平台，支持 RAG（检索增强生成）和 Agent（智能体）两种模式，让你的文档"活"起来。
 
-在线预览：https://ai-agent-platform-fp6v.vercel.app/
+在线预览（必须翻墙）：https://ai-agent-platform-fp6v.vercel.app/
+
+界面预览：![alt text](image.png)
 
 ![技术栈](https://img.shields.io/badge/Next.js-16.2.3-black?style=flat-square&logo=next.js)
 ![技术栈](https://img.shields.io/badge/React-19.2.4-61DAFB?style=flat-square&logo=react)
