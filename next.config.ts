@@ -42,24 +42,30 @@ const nextConfig: NextConfig = {
 
   /**
    * Turbopack 配置
-   * Next.js 16 默认使用 Turbopack，需要显式配置
+   * Next.js 16 默认使用 Turbopack
+   * 使用 glob 模式匹配文件，而不是 test 正则
    */
   turbopack: {
-    // 使用 webpack 加载器规则处理模型文件
-    rules: [
-      {
-        test: /\.(onnx|bin)$/,
-        include: /public[\/]models/,
-        use: [
-          {
-            loader: 'file-loader',
-            options: {
-              name: 'static/models/[name].[ext]',
-            },
+    // 配置模型文件的加载规则
+    rules: {
+      // 匹配 .onnx 和 .bin 文件
+      '*.onnx': [
+        {
+          loader: 'file-loader',
+          options: {
+            name: 'static/models/[name].[ext]',
           },
-        ],
-      },
-    ],
+        },
+      ],
+      '*.bin': [
+        {
+          loader: 'file-loader',
+          options: {
+            name: 'static/models/[name].[ext]',
+          },
+        },
+      ],
+    },
   },
 
   /**
