@@ -2,6 +2,8 @@
 
 一个基于 Next.js + LangChain 构建的 AI 智能问答平台，支持 RAG（检索增强生成）和 Agent（智能体）两种模式，让你的文档"活"起来。
 
+在线预览：https://ai-agent-platform-fp6v.vercel.app/
+
 ![技术栈](https://img.shields.io/badge/Next.js-16.2.3-black?style=flat-square&logo=next.js)
 ![技术栈](https://img.shields.io/badge/React-19.2.4-61DAFB?style=flat-square&logo=react)
 ![技术栈](https://img.shields.io/badge/TypeScript-5.0-blue?style=flat-square&logo=typescript)
@@ -128,9 +130,12 @@ ai-agent-platform/
 │   │   └── utils.ts              # 工具函数
 │   └── store/                    # 状态管理
 │       └── app-store.ts          # Zustand 全局状态
+├── scripts/
+│   └── download-models.js        # 模型预下载脚本
+├── public/models/                # 预下载的模型文件
 ├── chroma-data/                  # 向量数据存储
 ├── .cache/transformers/          # 本地模型缓存
-├── public/                       # 静态资源
+├── next.config.ts                # Next.js 配置
 └── package.json
 ```
 
@@ -170,7 +175,7 @@ ai-agent-platform/
 ## 🚀 快速开始
 
 ### 环境要求
-- Node.js 18+
+- Node.js 22+ (推荐)
 - npm 或 yarn
 
 ### 安装依赖
@@ -212,6 +217,66 @@ npm run dev
 ```bash
 npm run build
 npm start
+```
+
+---
+
+## 🌐 Serverless 部署
+
+本项目已针对 Serverless 平台（Vercel、AWS Lambda、Netlify 等）进行优化，Embedding 模型会预打包到项目中，无需运行时下载。
+
+### 模型预下载
+
+构建时会自动下载模型文件到 `public/models/` 目录：
+
+```bash
+npm run download-models
+```
+
+或手动运行：
+
+```bash
+node scripts/download-models.js
+```
+
+### 部署到 Vercel
+
+```bash
+# 安装 Vercel CLI
+npm i -g vercel
+
+# 部署
+vercel --prod
+```
+
+### 部署配置说明
+
+**关键配置项** ([`next.config.ts`](next.config.ts))：
+
+```typescript
+{
+  output: 'standalone',  // Serverless 优化输出
+  turbopack: { ... },    // Turbopack 配置
+  webpack: { ... },      // Webpack 配置（兼容性）
+}
+```
+
+**本地模型加载** ([`src/lib/local-embeddings.ts`](src/lib/local-embeddings.ts))：
+
+- 自动检测 Serverless 环境（`VERCEL`, `AWS_LAMBDA_FUNCTION_NAME`, `NETLIFY`）
+- Serverless 环境自动禁用远程模型下载
+- 从 `public/models/` 加载预打包的模型文件
+
+### 模型文件结构
+
+```
+public/models/
+└── Xenova--bge-small-zh-v1.5/
+    ├── config.json
+    ├── tokenizer.json
+    ├── tokenizer_config.json
+    └── onnx/
+        └── model_quantized.onnx (约 23MB)
 ```
 
 ---
@@ -271,11 +336,24 @@ npm start
 - 自动持久化到本地文件
 
 ### Local Embeddings (`src/lib/local-embeddings.ts`)
-本地 Embedding 模型：
+本地 Embedding 模型，已针对 Serverless 优化：
 - 使用 Xenova Transformers 运行 ONNX 模型
 - 支持 bge-small-zh-v1.5（中文优化）
 - 完全免费，无需 API 密钥
 - 数据隐私，不上传云端
+- **Serverless 环境自动使用预打包模型**
+
+**API：**
+```typescript
+// 创建 Embedding 实例
+const embeddings = createLocalEmbeddings('Xenova/bge-small-zh-v1.5');
+
+// 检查模型是否已下载
+const isDownloaded = isModelDownloaded('Xenova/bge-small-zh-v1.5');
+
+// 获取已下载的模型列表
+const models = getDownloadedModels();
+```
 
 ---
 
