@@ -271,15 +271,28 @@ vercel --prod
 
 ### 模型文件结构
 
+下载后的模型存储在 `public/models/` 目录：
+
 ```
 public/models/
-└── Xenova--bge-small-zh-v1.5/
+└── Xenova--bge-small-zh-v1.5/          # 实际模型文件（约 23MB）
     ├── config.json
     ├── tokenizer.json
     ├── tokenizer_config.json
     └── onnx/
-        └── model_quantized.onnx (约 23MB)
+        └── model_quantized.onnx
 ```
+
+运行时自动创建符号链接（无需手动操作）：
+
+```
+public/models/
+├── Xenova--bge-small-zh-v1.5/          # 实际存储
+└── Xenova/                             # 自动创建
+    └── bge-small-zh-v1.5/ → ../Xenova--bge-small-zh-v1.5/  # 符号链接
+```
+
+> **注意：** 符号链接用于桥接下载格式（双横线）和 Transformers.js 期望格式（斜杠）的差异。
 
 ---
 
@@ -345,6 +358,17 @@ public/models/
 - 数据隐私，不上传云端
 - **Serverless 环境自动使用预打包模型**
 
+**模型目录结构处理：**
+
+下载脚本使用 `Xenova--bge-small-zh-v1.5`（双横线）格式存储模型，而 Transformers.js 库期望 `Xenova/bge-small-zh-v1.5`（斜杠）目录结构。系统会自动创建符号链接来桥接这个差异：
+
+```
+public/models/
+├── Xenova--bge-small-zh-v1.5/    # 实际存储目录
+└── Xenova/
+    └── bge-small-zh-v1.5/        # 自动创建的符号链接 → Xenova--bge-small-zh-v1.5/
+```
+
 **API：**
 ```typescript
 // 创建 Embedding 实例
@@ -355,6 +379,9 @@ const isDownloaded = isModelDownloaded('Xenova/bge-small-zh-v1.5');
 
 // 获取已下载的模型列表
 const models = getDownloadedModels();
+
+// 获取调试信息（排查路径问题）
+const debugInfo = getDebugInfo();
 ```
 
 ---
@@ -387,7 +414,85 @@ const models = getDownloadedModels();
 
 ---
 
-## 📝 开发计划
+## �️ 故障排除
+
+### 模型加载失败
+
+**症状：** 聊天时出现 "模型文件不存在" 或 "local_files_only=true" 错误
+
+**解决方案：**
+
+1. **检查模型文件是否存在**
+   ```bash
+   ls public/models/Xenova--bge-small-zh-v1.5/
+   # 应该包含: config.json, tokenizer.json, onnx/model_quantized.onnx
+   ```
+
+2. **重新下载模型**
+   ```bash
+   node scripts/download-models.js
+   ```
+
+3. **检查调试信息**
+   在浏览器控制台或服务器日志中查看 `[LocalEmbeddings]` 开头的调试信息，确认：
+   - 模型基础路径是否正确
+   - 是否成功创建符号链接
+   - 目录结构是否符合预期
+
+4. **手动创建符号链接（Windows）**
+   如果自动创建失败，可以手动创建：
+   ```powershell
+   cd public/models
+   mkdir Xenova
+   cmd /c mklink /J Xenova\bge-small-zh-v1.5 Xenova--bge-small-zh-v1.5
+   ```
+
+### RAG 检索不到文档
+
+**症状：** AI 回答 "根据已有信息无法回答" 或完全不引用文档
+
+**检查清单：**
+- [ ] 文档是否成功上传并显示在左侧面板
+- [ ] 配置面板中 "RAG 检索" 开关是否开启
+- [ ] 向量存储文件是否存在 (`chroma-data/` 目录)
+- [ ] 文档内容是否为空或无法解析
+
+### Vercel 部署后模型加载失败
+
+**症状：** 本地运行正常，部署到 Vercel 后无法加载模型
+
+**解决方案：**
+
+1. 确保 `vercel.json` 中配置了 `includeFiles`：
+   ```json
+   {
+     "functions": {
+       "src/app/api/**/*.ts": {
+         "includeFiles": "public/models/**"
+       }
+     }
+   }
+   ```
+
+2. 检查构建日志中是否成功下载模型
+
+3. 设置环境变量强制使用远程模型（不推荐用于生产）：
+   ```env
+   FORCE_REMOTE_MODELS=true
+   ```
+
+### 流式输出不工作
+
+**症状：** AI 回答一次性显示，没有打字机效果
+
+**检查清单：**
+- [ ] 配置面板中 "流式输出" 开关是否开启
+- [ ] 是否使用了不支持流式的模型
+- [ ] 浏览器控制台是否有 SSE 连接错误
+
+---
+
+## �� 开发计划
 
 - [ ] 支持更多文档格式（Word、Excel、PPT）
 - [ ] 接入真实搜索 API（SerpAPI、Bing Search）

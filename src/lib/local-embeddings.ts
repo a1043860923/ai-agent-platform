@@ -30,11 +30,20 @@ import fs from 'fs';
 // ==================== 环境配置 ====================
 
 // 检测是否在 Serverless 环境
+// 注意：vercel dev 也会设置 VERCEL=1，需要排除本地开发环境
 const isServerless: boolean = !!(
-  process.env.VERCEL === '1' || 
-  process.env.AWS_LAMBDA_FUNCTION_NAME || 
-  process.env.NETLIFY === 'true'
+  // Vercel 生产部署：VERCEL=1 且 VERCEL_ENV=production
+  (process.env.VERCEL === '1' && process.env.VERCEL_ENV === 'production') ||
+  // AWS Lambda
+  !!process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  // Netlify 生产部署
+  (process.env.NETLIFY === 'true' && process.env.CONTEXT === 'production')
 );
+
+// 检测是否为本地开发环境（vercel dev 或 npm run dev）
+const isLocalDev: boolean = !!(
+  process.env.VERCEL === '1' && process.env.VERCEL_ENV === 'development'
+) || process.env.NODE_ENV === 'development';
 
 // 检测是否在浏览器/客户端环境
 const isBrowser = typeof window !== 'undefined';
@@ -210,51 +219,83 @@ function isModelAvailableLocally(modelName: string): boolean {
 }
 
 /**
- * 为模型创建符号链接，使其符合 Transformers.js 的目录结构期望
- * Transformers.js 期望: Xenova/bge-small-zh-v1.5/ (带斜杠的子目录)
- * 实际存储: Xenova--bge-small-zh-v1.5/ (双横线格式)
+ * 为模型准备可写的目录（Serverless 环境）
+ * 
+ * Vercel 等 Serverless 平台的文件系统是只读的，需要将模型复制到 /tmp 目录
+ * 同时创建符号链接桥接目录命名差异（Xenova--bge-small-zh-v1.5 → Xenova/bge-small-zh-v1.5）
+ * 
+ * @returns 准备好的模型基础目录，或 null
  */
-function createModelSymlink(modelName: string): string | null {
+function prepareWritableModelDir(modelName: string): string | null {
   const localName = MODEL_PATH_MAPPING[modelName];
   if (!localName) return null;
   
   try {
-    const basePath = getModelBasePath();
+    // 在 Serverless 环境中，优先使用 /tmp 目录（可写）
+    // 在本地开发环境，使用原始的 public/models 路径
+    const basePath = isServerless ? '/tmp/models' : getModelBasePath();
     if (!basePath) return null;
     
-    const sourcePath = path.join(basePath, localName);
+    const sourcePath = isServerless 
+      ? path.join(process.cwd(), 'public', 'models', localName)
+      : path.join(basePath, localName);
+    
+    // 如果源路径不存在，跳过
+    if (!fs.existsSync(sourcePath)) {
+      debugLog(`源模型路径不存在: ${sourcePath}`);
+      return isServerless ? basePath : null;
+    }
     
     // 解析 modelName 创建目标目录结构 (Xenova/bge-small-zh-v1.5)
     const [org, model] = modelName.split('/');
     if (!org || !model) return null;
     
-    const orgDir = path.join(basePath, org);
-    const targetPath = path.join(orgDir, model);
+    const targetOrgDir = path.join(basePath, org);
+    const targetPath = path.join(targetOrgDir, model);
     
-    // 如果目标已存在且是有效的符号链接或目录，直接返回
+    // 如果目标已存在（符号链接或目录），直接返回
     if (fs.existsSync(targetPath)) {
-      return targetPath;
+      debugLog(`模型目录已存在: ${targetPath}`);
+      return basePath;
     }
     
-    // 创建组织目录 (如 Xenova/)
-    if (!fs.existsSync(orgDir)) {
-      fs.mkdirSync(orgDir, { recursive: true });
+    // 创建目标目录
+    if (!fs.existsSync(targetOrgDir)) {
+      fs.mkdirSync(targetOrgDir, { recursive: true });
+      debugLog(`创建目录: ${targetOrgDir}`);
     }
     
-    // 创建符号链接 (Windows 需要管理员权限，失败则尝试复制)
-    try {
-      fs.symlinkSync(sourcePath, targetPath, 'junction');
-      debugLog(`创建符号链接: ${targetPath} -> ${sourcePath}`);
-    } catch (symlinkError) {
-      // Windows 上可能需要管理员权限，尝试复制目录
-      debugLog(`符号链接失败，尝试复制目录...`);
-      fs.cpSync(sourcePath, targetPath, { recursive: true });
-      debugLog(`复制目录完成: ${targetPath}`);
+    // 在 Serverless 环境中，尝试创建符号链接
+    if (isServerless) {
+      try {
+        // 在 Linux/Vercel 上可以使用符号链接
+        fs.symlinkSync(sourcePath, targetPath, 'dir');
+        debugLog(`创建符号链接: ${targetPath} -> ${sourcePath}`);
+      } catch (symlinkError: any) {
+        // 符号链接失败（可能在某些环境），尝试复制目录
+        if (symlinkError.code === 'EXDEV' || symlinkError.message?.includes('cross-device')) {
+          debugLog(`符号链接失败（跨设备），复制目录...`);
+          fs.cpSync(sourcePath, targetPath, { recursive: true });
+          debugLog(`复制目录完成: ${targetPath}`);
+        } else {
+          throw symlinkError;
+        }
+      }
+    } else {
+      // 本地环境：创建符号链接或复制
+      try {
+        fs.symlinkSync(sourcePath, targetPath, 'junction');
+        debugLog(`创建符号链接: ${targetPath} -> ${sourcePath}`);
+      } catch (symlinkError) {
+        debugLog(`符号链接失败，尝试复制目录...`);
+        fs.cpSync(sourcePath, targetPath, { recursive: true });
+        debugLog(`复制目录完成: ${targetPath}`);
+      }
     }
     
-    return targetPath;
+    return basePath;
   } catch (e) {
-    debugLog('创建模型符号链接失败:', e);
+    debugLog('准备模型目录失败:', e);
     return null;
   }
 }
@@ -358,18 +399,21 @@ export class LocalEmbeddings extends Embeddings {
         if (localPath) {
           debugLog(`使用本地模型: ${localPath}`);
           
-          // 创建符号链接，使模型目录符合 Transformers.js 的期望结构
-          const symlinkPath = createModelSymlink(this.modelName);
-          if (symlinkPath) {
-            debugLog(`模型符号链接: ${symlinkPath}`);
+          // 在 Serverless 环境中准备可写的模型目录
+          let cacheBasePath = getModelBasePath();
+          if (isServerless) {
+            const writablePath = prepareWritableModelDir(this.modelName);
+            if (writablePath) {
+              cacheBasePath = writablePath;
+              debugLog(`Serverless 环境使用可写目录: ${writablePath}`);
+            }
           }
           
           // 设置 Transformers.js 环境变量，指向模型基础目录
-          const basePath = getModelBasePath();
-          if (basePath && typeof env !== 'undefined' && env) {
-            env.cacheDir = basePath;
+          if (cacheBasePath && typeof env !== 'undefined' && env) {
+            env.cacheDir = cacheBasePath;
             // @ts-ignore
-            env.localModelPath = basePath;
+            env.localModelPath = cacheBasePath;
             
             // 禁用远程模型下载，强制使用本地文件
             if (isServerless) {
