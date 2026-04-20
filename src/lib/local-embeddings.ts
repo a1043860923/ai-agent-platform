@@ -33,8 +33,7 @@ import fs from 'fs';
 const isServerless: boolean = !!(
   process.env.VERCEL === '1' || 
   process.env.AWS_LAMBDA_FUNCTION_NAME || 
-  process.env.NETLIFY === 'true' ||
-  process.env.NODE_ENV === 'production'
+  process.env.NETLIFY === 'true'
 );
 
 // 检测是否在浏览器/客户端环境
@@ -57,19 +56,18 @@ function debugLog(...args: any[]) {
 function getPossibleModelPaths(): string[] {
   const paths: string[] = [];
   
+  paths.push(
+    path.join(process.cwd(), 'public', 'models'),
+    path.join(process.cwd(), '.cache', 'transformers'),
+  );
+
   if (isServerless) {
-    // Vercel 部署时的可能路径（按优先级排序）
-    // Vercel 使用 includeFiles 将模型文件打包到函数中
     paths.push(
-      path.join(process.cwd(), 'public', 'models'),  // Vercel 打包后的路径
-      path.join('/var/task', 'public', 'models'),    // Vercel 运行时路径
+      path.join('/var/task', 'public', 'models'),
       path.join(process.cwd(), '.next', 'standalone', 'public', 'models'),
       path.join('/var/task', '.next', 'standalone', 'public', 'models'),
       path.join('/tmp', 'models'),
     );
-  } else {
-    // 本地开发路径
-    paths.push(path.join(process.cwd(), '.cache', 'transformers'));
   }
   
   return paths;
@@ -211,6 +209,56 @@ function isModelAvailableLocally(modelName: string): boolean {
   return getLocalModelPath(modelName) !== null;
 }
 
+/**
+ * 为模型创建符号链接，使其符合 Transformers.js 的目录结构期望
+ * Transformers.js 期望: Xenova/bge-small-zh-v1.5/ (带斜杠的子目录)
+ * 实际存储: Xenova--bge-small-zh-v1.5/ (双横线格式)
+ */
+function createModelSymlink(modelName: string): string | null {
+  const localName = MODEL_PATH_MAPPING[modelName];
+  if (!localName) return null;
+  
+  try {
+    const basePath = getModelBasePath();
+    if (!basePath) return null;
+    
+    const sourcePath = path.join(basePath, localName);
+    
+    // 解析 modelName 创建目标目录结构 (Xenova/bge-small-zh-v1.5)
+    const [org, model] = modelName.split('/');
+    if (!org || !model) return null;
+    
+    const orgDir = path.join(basePath, org);
+    const targetPath = path.join(orgDir, model);
+    
+    // 如果目标已存在且是有效的符号链接或目录，直接返回
+    if (fs.existsSync(targetPath)) {
+      return targetPath;
+    }
+    
+    // 创建组织目录 (如 Xenova/)
+    if (!fs.existsSync(orgDir)) {
+      fs.mkdirSync(orgDir, { recursive: true });
+    }
+    
+    // 创建符号链接 (Windows 需要管理员权限，失败则尝试复制)
+    try {
+      fs.symlinkSync(sourcePath, targetPath, 'junction');
+      debugLog(`创建符号链接: ${targetPath} -> ${sourcePath}`);
+    } catch (symlinkError) {
+      // Windows 上可能需要管理员权限，尝试复制目录
+      debugLog(`符号链接失败，尝试复制目录...`);
+      fs.cpSync(sourcePath, targetPath, { recursive: true });
+      debugLog(`复制目录完成: ${targetPath}`);
+    }
+    
+    return targetPath;
+  } catch (e) {
+    debugLog('创建模型符号链接失败:', e);
+    return null;
+  }
+}
+
 // ==================== LocalEmbeddings 类 ====================
 
 /**
@@ -300,34 +348,37 @@ export class LocalEmbeddings extends Embeddings {
     debugLog(`正在加载模型: ${this.modelName}...`);
 
     try {
-      // 准备 pipeline 配置
       const pipelineConfig: any = {
         quantized: this.quantized,
       };
       
-      // 如果使用本地模型，配置本地路径
       if (this.useLocalModels || isServerless) {
         const localPath = getLocalModelPath(this.modelName);
         
         if (localPath) {
           debugLog(`使用本地模型: ${localPath}`);
           
-          // 设置 Transformers.js 环境
+          // 创建符号链接，使模型目录符合 Transformers.js 的期望结构
+          const symlinkPath = createModelSymlink(this.modelName);
+          if (symlinkPath) {
+            debugLog(`模型符号链接: ${symlinkPath}`);
+          }
+          
+          // 设置 Transformers.js 环境变量，指向模型基础目录
           const basePath = getModelBasePath();
           if (basePath && typeof env !== 'undefined' && env) {
             env.cacheDir = basePath;
             // @ts-ignore
             env.localModelPath = basePath;
-            // @ts-ignore
-            env.modelsDir = basePath;
+            
+            // 禁用远程模型下载，强制使用本地文件
+            if (isServerless) {
+              env.allowRemoteModels = false;
+            }
           }
           
-          // 在 Serverless 环境，使用本地路径作为模型名称
-          if (isServerless) {
-            pipelineConfig.local = true;
-          }
+          pipelineConfig.local_files_only = true;
         } else if (isServerless && !FORCE_REMOTE_MODELS) {
-          // Serverless 环境但没有本地模型，且不允许远程下载
           const error = new Error(
             `模型文件不完整。请确保已运行: node scripts/download-models.js 并下载完整的模型文件（包括 .onnx 文件）。` +
             `或者设置环境变量 FORCE_REMOTE_MODELS=true 允许运行时下载（不推荐用于生产环境）。` +
@@ -337,19 +388,16 @@ export class LocalEmbeddings extends Embeddings {
         }
       }
       
-      // 如果不是 Serverless 环境，显示下载提示
       if (!isServerless && !this.useLocalModels) {
         debugLog(`首次加载需要下载模型文件（约几十MB），请耐心等待...`);
       }
 
-      // 创建 feature-extraction pipeline
       debugLog('调用 pipeline()...');
       LocalEmbeddings.pipeline = await pipeline(
         'feature-extraction' as PipelineType,
         this.modelName,
         {
           ...pipelineConfig,
-          // 进度回调
           progress_callback: (progress: any) => {
             if (progress.status === 'progress') {
               const percentage = Math.round((progress.loaded / progress.total) * 100);
